@@ -306,15 +306,6 @@ impl Pool {
         queued: bool,
         queue_id: QueueId,
     ) -> Poll<Result<GetConnInner>> {
-        self.poll_new_conn_inner(cx, queued, queue_id)
-    }
-
-    fn poll_new_conn_inner(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        queued: bool,
-        queue_id: QueueId,
-    ) -> Poll<Result<GetConnInner>> {
         let mut exchange = self.inner.exchange.lock().unwrap();
 
         // NOTE: this load must happen while we hold the lock,
