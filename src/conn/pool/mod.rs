@@ -133,8 +133,8 @@ impl Waitlist {
         self.queue.remove(&tmp);
     }
 
-    fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+    fn peek_id(&mut self) -> Option<QueueId> {
+        self.queue.peek().map(|(qw, _)| qw.queue_id)
     }
 }
 
@@ -303,7 +303,6 @@ impl Pool {
     fn poll_new_conn(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        queued: bool,
         queue_id: QueueId,
     ) -> Poll<Result<GetConnInner>> {
         let mut exchange = self.inner.exchange.lock().unwrap();
@@ -317,8 +316,15 @@ impl Pool {
 
         exchange.spawn_futures_if_needed(&self.inner);
 
-        // Check if others are waiting and we're not queued.
-        if !exchange.waiting.is_empty() && !queued {
+        // Check if we are higher priority than anything current
+        let highest = if let Some(cur) = exchange.waiting.peek_id() {
+            queue_id > cur
+        } else {
+            true
+        };
+
+        // If we are not, just queue
+        if !highest {
             exchange.waiting.push(cx.waker().clone(), queue_id);
             return Poll::Pending;
         }
@@ -390,7 +396,7 @@ mod test {
 
     use std::{
         cmp::Reverse,
-        task::{RawWaker, RawWakerVTable, Waker},
+        task::{Poll, RawWaker, RawWakerVTable, Waker},
         time::Duration,
     };
 
@@ -1040,6 +1046,38 @@ mod test {
         // Go even below min pool size.
         sleep(Duration::from_millis(1000)).await;
         assert_eq!(ex_field!(pool, exist), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn check_priorities() -> super::Result<()> {
+        let pool = pool_with_one_connection();
+
+        // Get a connection so that fut1 and fut2 will queue
+        let conn = pool.get_conn().await.unwrap();
+
+        let mut fut1 = async {
+            pool.get_conn().await.unwrap();
+        }
+        .shared();
+        let mut fut2 = async {
+            pool.get_conn().await.unwrap();
+        }
+        .shared();
+
+        // Poll fut1 first so we know it has the highest priority
+        let p = futures_util::poll!(fut1.clone());
+        assert!(matches!(p, Poll::Pending));
+
+        // Drop the connection to unblock the futures and check that
+        // the one with the higher priority comes out.
+        drop(conn);
+        let s = futures_util::select! {
+            _ = fut1 => 1,
+            _ = fut2 => 2,
+        };
+        assert_eq!(s, 1);
 
         Ok(())
     }
